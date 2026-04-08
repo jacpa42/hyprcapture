@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
     addDependencies(b, exe.root_module, target, optimize);
     addRunStep(b, exe);
 
-    const release = b.step("release", "Create release builds of typetest");
+    const release = b.step("release", "Create release builds of hyprcapture");
     const git_version = getGitVersion(b);
     if (git_version == .tag) {
         if (std.mem.eql(u8, zon.version, git_version.tag[1..])) {
@@ -64,12 +64,12 @@ fn addRunStep(
 
 fn setupTestStep(
     b: *std.Build,
-    typetest: *std.Build.Module,
+    hyprcapture: *std.Build.Module,
 ) void {
     const test_step = b.step("test", "Run unit tests");
 
     const unit_tests = b.addTest(.{
-        .root_module = typetest,
+        .root_module = hyprcapture,
         .filters = b.args orelse &.{},
     });
 
@@ -91,16 +91,16 @@ fn setupReleaseStep(
     for (targets) |t| {
         const target = b.resolveTargetQuery(t);
         const optimize = std.builtin.OptimizeMode.ReleaseFast;
-        const tt_root_module = b.createModule(.{
+        const root_module = b.createModule(.{
             .root_source_file = b.path("hyprcapture.zig"),
             .target = target,
             .optimize = optimize,
         });
-        addDependencies(b, tt_root_module, target, optimize);
+        addDependencies(b, root_module, target, optimize);
 
-        const tt_exe_release = b.addExecutable(.{
-            .name = "typetest",
-            .root_module = tt_root_module,
+        const exe_release = b.addExecutable(.{
+            .name = "hyprcapture",
+            .root_module = root_module,
         });
 
         switch (t.os_tag.?) {
@@ -117,7 +117,7 @@ fn setupReleaseStep(
                     "-j",
                 });
                 const archive = zip.addOutputFileArg(archive_name);
-                zip.addDirectoryArg(tt_exe_release.getEmittedBin());
+                zip.addDirectoryArg(exe_release.getEmittedBin());
                 _ = zip.captureStdOut();
 
                 release_step.dependOn(&b.addInstallFileWithDir(
@@ -139,8 +139,8 @@ fn setupReleaseStep(
                 const archive = tar.addOutputFileArg(archive_name);
                 tar.addArg("-C");
 
-                tar.addDirectoryArg(tt_exe_release.getEmittedBinDirectory());
-                tar.addArg("typetest");
+                tar.addDirectoryArg(exe_release.getEmittedBinDirectory());
+                tar.addArg("hyprcapture");
                 _ = tar.captureStdOut();
 
                 release_step.dependOn(&b.addInstallFileWithDir(
