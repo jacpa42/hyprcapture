@@ -5,62 +5,86 @@ const sqlite = @import("sqlite");
 const ping_ns = 500 * std.time.ns_per_ms;
 const ping_seconds = @as(comptime_float, ping_ns) / @as(comptime_float, std.time.ns_per_s);
 
-const create =
+/// What we actually store in the db
+const UsageData = struct {
+    class: []const u8,
+    title: []const u8,
+    duration: u64, // ns
+};
+
+const create_table =
     \\create table if not exists usage (
     \\  class text not null,
     \\  title text not null,
-    \\  duration sqlite_uint64 not null default 0,
+    \\  duration integer not null default 0,
     \\  unique(class, title)
     \\);
 ;
+
 const insert =
-    \\insert into usage (class, title, duration)
-    \\  values (?, ?, ?)
-    \\  on conflict(class, title)
-    \\  do update set duration = duration + excluded.duration;
+    \\INSERT INTO usage(class,title,duration) VALUES(?,?,?)
+    \\  ON CONFLICT(class, title)
+    \\  DO UPDATE SET duration = duration + excluded.duration;
 ;
 
 /// Communictes over the hyprland socket like hyprctl
 pub fn main() !void {
     var __string_storage_buffer: [1024 * 1024]u8 = undefined;
     var string_fba = std.heap.FixedBufferAllocator.init(&__string_storage_buffer);
-    const string_alloc = string_fba.allocator();
 
-    // Get the database path
-    var args = std.process.args();
-    _ = args.skip();
+    var gpa_with_fallback = std.heap.stackFallback(4 * 1024 * 1024, std.heap.page_allocator);
+    const alloc = gpa_with_fallback.get();
 
-    const database_path = args.next() orelse return error.ExpectedSqliteDatabaseFilePath;
-    var db = try sqlite.Db.init(.{
-        .mode = sqlite.Db.Mode{ .File = database_path },
-        .open_flags = .{ .write = true, .create = true },
-        .threading_mode = .MultiThread,
-    });
+    const socket_path = try getSocketPath(string_fba.allocator());
+
+    const cmdline_args = try parseArgs();
+    var db = try initDatabase(cmdline_args.database_path);
     defer db.deinit();
+    var insert_statement = try db.prepare(insert);
+    defer insert_statement.deinit();
 
-    try db.exec(create, .{ .diags = null }, .{});
-
-    const socket_path = try getSocketPath(string_alloc);
+    var usage_data_list = try std.ArrayList(UsageData).initCapacity(alloc, 1024);
 
     var timer = std.time.Timer.start() catch unreachable;
     while (true) : (timer.reset()) {
         defer std.Thread.sleep(ping_ns -| timer.lap());
 
-        const stream = try std.net.connectUnixSocket(socket_path);
-        defer stream.close();
+        const end_index = string_fba.end_index;
+        defer string_fba.end_index = end_index;
 
         {
-            var stream_writer = stream.writer(&.{});
-            const writer: *std.Io.Writer = &stream_writer.interface;
-            try writer.writeAll("clients");
+            defer std.log.info("Took {}ns", .{timer.read()});
+            const stream = try std.net.connectUnixSocket(socket_path);
+            defer stream.close();
+
+            {
+                var stream_writer = stream.writer(&.{});
+                const writer: *std.Io.Writer = &stream_writer.interface;
+                try writer.writeAll("clients");
+            }
+
+            // read the output
+            var stream_reader_buf: [1024]u8 = undefined;
+            var stream_reader = stream.reader(&stream_reader_buf);
+
+            usage_data_list.clearRetainingCapacity();
+
+            const reader: *std.Io.Reader = stream_reader.interface();
+            while (try parsing.takeNext(reader, &string_fba)) |client_info| {
+                usage_data_list.append(alloc, .{
+                    .class = client_info.class,
+                    .title = client_info.title,
+                    .duration = ping_ns,
+                }) catch @panic("oom!");
+            }
         }
 
-        // read the output
-        var stream_reader_buf: [1024]u8 = undefined;
-        var stream_reader = stream.reader(&stream_reader_buf);
-
-        const reader: *std.Io.Reader = stream_reader.interface();
-        while (try parsing.takeNext(reader, string_alloc, &db)) |_| {}
+        try db.exec("begin transaction", .{}, .{});
+        defer db.exec("commit", .{}, .{}) catch {};
+        for (usage_data_list.items) |usage_data| {
+            insert_statement.reset();
+            try insert_statement.exec(.{}, usage_data);
+        }
     }
 }
 
@@ -97,17 +121,15 @@ const parsing = struct {
     /// struct, otherwise outputs `null` if at the end of the stream.
     fn takeNext(
         reader: *std.Io.Reader,
-        string_alloc: std.mem.Allocator,
-        database: *sqlite.Db,
-    ) !?void {
+        string_buffer: *std.heap.FixedBufferAllocator,
+    ) !?ClientInfo {
+        const stralloc = string_buffer.allocator();
+
         var info = ClientInfo{
             .class = &.{},
             .title = &.{},
             .focusHistoryID = FocusHistoryID.not_found,
         };
-
-        defer string_alloc.free(info.class);
-        defer string_alloc.free(info.title);
 
         // Skip the first line as we dont need the title and address
         {
@@ -123,53 +145,47 @@ const parsing = struct {
             if (trimmed_line.len == 0) break;
 
             const @":" = std.mem.indexOfScalar(u8, trimmed_line, ':') orelse unreachable;
-            const T = std.meta.FieldEnum(ClientInfo);
-            const field = std.meta.stringToEnum(T, trimmed_line[0..@":"]) orelse continue;
+            const field = std.meta.stringToEnum(
+                std.meta.FieldEnum(ClientInfo),
+                trimmed_line[0..@":"],
+            ) orelse continue;
+
+            const value = trim(trimmed_line[@":" + 1 ..]);
 
             switch (field) {
-                .class => info.class = try string_alloc.dupe(u8, trim(trimmed_line[@":" + 1 ..])),
-                .title => info.title = try string_alloc.dupe(u8, trim(trimmed_line[@":" + 1 ..])),
-                .focusHistoryID => {
-                    const id = try std.fmt.parseInt(i16, trim(trimmed_line[@":" + 1 ..]), 10);
-                    info.focusHistoryID = @enumFromInt(id);
-                },
+                .class => info.class = try stralloc.dupe(u8, value),
+                .title => info.title = try stralloc.dupe(u8, value),
+                .focusHistoryID => info.focusHistoryID = @enumFromInt(try std.fmt.parseInt(i16, value, 10)),
             }
         }
 
-        if (info.focusHistoryID == .focused) {
-            try database.exec(insert, .{ .diags = null }, .{
-                .class = info.class,
-                .title = info.title,
-                .duration = ping_ns,
-            });
-        }
+        return info;
     }
 };
 
-/// Value is the total time it is focused for
-const WindowUsageData = std.StringArrayHashMapUnmanaged(f32);
+fn parseArgs() !Args {
+    var args = std.process.args();
+    _ = args.skip();
+    const database_path = if (args.next()) |path| path else blk: {
+        std.log.err("Expected a path to a sqlite database file. Falling back to ./hyprcapture.sqlite", .{});
+        break :blk "./hyprcapture.sqlite";
+    };
 
-/// Note: keys are not managed :)
-fn windowUsageDataDeinit(data: *WindowUsageData, gpa: std.mem.Allocator) void {
-    var it = data.iterator();
-    while (it.next()) |kv| {
-        gpa.free(kv.key_ptr.*);
-    }
-    data.deinit(gpa);
+    return .{ .database_path = database_path };
 }
 
-fn writeUsageDataToFile(data: *WindowUsageData) !void {
-    var iobuf: [1024]u8 = undefined;
-    var file = try std.fs.cwd().createFile("stats.json", .{});
-    defer file.close();
-    var file_writer = file.writer(&iobuf);
+const Args = struct {
+    database_path: [:0]const u8,
+};
 
-    const map = std.json.fmt(
-        std.json.ArrayHashMap(f32){ .map = data.* },
-        .{ .whitespace = .indent_4 },
-    );
-    try map.format(&file_writer.interface);
-    try file_writer.interface.flush();
+fn initDatabase(database_path: [:0]const u8) !sqlite.Db {
+    var db = try sqlite.Db.init(.{
+        .mode = sqlite.Db.Mode{ .File = database_path },
+        .open_flags = .{ .write = true, .create = true },
+        .threading_mode = .MultiThread,
+    });
+    try db.exec(create_table, .{ .diags = null }, .{});
+    return db;
 }
 
 fn trim(list: []const u8) []const u8 {
