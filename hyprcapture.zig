@@ -3,7 +3,6 @@ const lib = @import("hyprcapture");
 const sqlite = @import("sqlite");
 
 const ping_ns = 50 * std.time.ns_per_ms;
-const ping_seconds = @as(comptime_float, ping_ns) / @as(comptime_float, std.time.ns_per_s);
 
 /// What we actually store in the db
 const UsageData = struct {
@@ -53,7 +52,6 @@ pub fn main() !void {
         defer string_fba.end_index = end_index;
 
         {
-            defer std.log.info("Took {}ns", .{timer.read()});
             const stream = try std.net.connectUnixSocket(socket_path);
             defer stream.close();
 
@@ -71,11 +69,13 @@ pub fn main() !void {
 
             const reader: *std.Io.Reader = stream_reader.interface();
             while (try parsing.takeNext(reader, &string_fba)) |client_info| {
-                usage_data_list.append(alloc, .{
-                    .class = client_info.class,
-                    .title = client_info.title,
-                    .duration = ping_ns,
-                }) catch @panic("oom!");
+                if (client_info.focusHistoryID == .focused) {
+                    usage_data_list.append(alloc, .{
+                        .class = client_info.class,
+                        .title = client_info.title,
+                        .duration = ping_ns,
+                    }) catch @panic("oom!");
+                }
             }
         }
 
@@ -167,7 +167,7 @@ fn parseArgs() !Args {
     var args = std.process.args();
     _ = args.skip();
     const database_path = if (args.next()) |path| path else blk: {
-        std.log.err("Expected a path to a sqlite database file. Falling back to ./hyprcapture.sqlite", .{});
+        std.log.warn("Expected a path to a sqlite database file. Falling back to \"hyprcapture.sqlite\"", .{});
         break :blk "./hyprcapture.sqlite";
     };
 

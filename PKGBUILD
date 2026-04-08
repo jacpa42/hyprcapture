@@ -9,7 +9,7 @@ url="https://github.com/jacpa42/$pkgname"
 license=('MIT')
 makedepends=('git' 'zig')
 source=("https://github.com/jacpa42/${pkgname}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('d7b4b9ba018a77adf118fea95b2bf2032d7cf69380193f956af5437e1115eb2b')
+sha256sums=('46ed0a9c7e04b8be44a562527fd19984cad2780f25dab033669104b9bf208567')
 
 build() {
     cd "$srcdir/$pkgname-${pkgver}"

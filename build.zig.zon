@@ -15,5 +15,6 @@
         "src",
         "PKGBUILD",
         "LICENSE",
+        "README.md",
     },
 }
