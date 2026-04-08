@@ -2,7 +2,7 @@ const std = @import("std");
 const lib = @import("hyprcapture");
 const sqlite = @import("sqlite");
 
-const ping_ns = 500 * std.time.ns_per_ms;
+const ping_ns = 50 * std.time.ns_per_ms;
 const ping_seconds = @as(comptime_float, ping_ns) / @as(comptime_float, std.time.ns_per_s);
 
 /// What we actually store in the db
