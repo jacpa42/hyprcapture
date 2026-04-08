@@ -13,11 +13,11 @@ const UsageData = struct {
 };
 
 const create_table =
-    \\create table if not exists usage (
-    \\  class text not null,
-    \\  title text not null,
-    \\  duration integer not null default 0,
-    \\  unique(class, title)
+    \\CREATE TABLE IF NOT EXISTS usage (
+    \\  class TEXT NOT NULL,
+    \\  title TEXT NOT NULL,
+    \\  duration INTEGER NOT NULL DEFAULT 0,
+    \\  UNIQUE(class, title)
     \\);
 ;
 
