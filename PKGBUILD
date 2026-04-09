@@ -13,7 +13,7 @@ sha256sums=('SKIP')
 
 build() {
     cd "$srcdir/$pkgname-${pkgver}"
-    zig build -Doptimize=ReleaseFast
+    zig build --release=fast
 }
 
 package() {
