@@ -15,18 +15,18 @@ const create_table =
     \\CREATE TABLE IF NOT EXISTS usage (
     \\  class TEXT NOT NULL,
     \\  title TEXT NOT NULL,
+    \\  date TEXT NOT NULL DEFAULT CURRENT_DATE,
     \\  duration INTEGER NOT NULL DEFAULT 0,
-    \\  UNIQUE(class, title)
+    \\  UNIQUE(class, title, date)
     \\);
 ;
 
 const insert =
     \\INSERT INTO usage(class,title,duration) VALUES(?,?,?)
-    \\  ON CONFLICT(class, title)
+    \\  ON CONFLICT(class,title,date)
     \\  DO UPDATE SET duration = duration + excluded.duration;
 ;
 
-/// Communictes over the hyprland socket like hyprctl
 pub fn main() !void {
     var __string_storage_buffer: [1024 * 1024]u8 = undefined;
     var string_fba = std.heap.FixedBufferAllocator.init(&__string_storage_buffer);
