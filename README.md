@@ -208,3 +208,21 @@ I use [jq](https://jqlang.org/) here for nice foramtting.
   }
 ]
 ```
+
+### Print out usage data for a specific app
+
+```bash
+~ ❯ sqlite3 hyprcapture.sqlite "
+    SELECT
+      ROUND(SUM(duration) / 3600e9, 3) AS total_hours,
+      COUNT(*) AS total_days_active,
+      ROUND((SUM(duration) / 3600e9) / COUNT(*), 3) AS avg_hours_per_day
+    FROM usage
+    WHERE title = 'mordith';
+    "
+╭─────────────┬───────────────────┬───────────────────╮
+│ total_hours │ total_days_active │ avg_hours_per_day │
+╞═════════════╪═══════════════════╪═══════════════════╡
+│       24.16 │                17 │             1.421 │
+╰─────────────┴───────────────────┴───────────────────╯
+```
