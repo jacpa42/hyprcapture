@@ -1,7 +1,7 @@
 # Maintainer: Jacob Enthoven <jacpa42@proton.me>
 
 pkgname=hyprcapture
-pkgver=0.0.2
+pkgver=0.0.3
 pkgrel=1
 pkgdesc="Application usage tracker"
 arch=('x86_64' 'aarch64' 'i686')
