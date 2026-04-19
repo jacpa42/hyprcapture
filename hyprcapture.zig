@@ -2,7 +2,8 @@ const std = @import("std");
 const lib = @import("hyprcapture");
 const sqlite = @import("sqlite");
 
-const ping_ns = 50 * std.time.ns_per_ms;
+const min_refresh_rate_ms = 10 * std.time.ns_per_ms;
+const max_refresh_rate_ms = 10_000 * std.time.ns_per_ms;
 
 /// What we actually store in the db
 const UsageData = struct {
@@ -28,25 +29,30 @@ const insert =
 ;
 
 pub fn main() !void {
-    var __string_storage_buffer: [1024 * 1024]u8 = undefined;
+    try std.posix.setrlimit(.STACK, .{
+        .cur = 1024 * 1024,
+        .max = 1024 * 1024,
+    });
+
+    var __string_storage_buffer: [8 * 1024]u8 = undefined;
     var string_fba = std.heap.FixedBufferAllocator.init(&__string_storage_buffer);
 
-    var gpa_with_fallback = std.heap.stackFallback(4 * 1024 * 1024, std.heap.page_allocator);
+    var gpa_with_fallback = std.heap.stackFallback(256 * 1024, std.heap.page_allocator);
     const alloc = gpa_with_fallback.get();
 
     const socket_path = try getSocketPath(string_fba.allocator());
 
-    const cmdline_args = try parseArgs();
-    var db = try initDatabase(cmdline_args.database_path);
+    const config = parseCmdline() catch |e| help(e);
+    var db = try initDatabase(config.database_path);
     defer db.deinit();
     var insert_statement = try db.prepare(insert);
     defer insert_statement.deinit();
 
-    var usage_data_list = try std.ArrayList(UsageData).initCapacity(alloc, 1024);
+    var usage_data_list = try std.ArrayList(UsageData).initCapacity(alloc, 128);
 
     var timer = std.time.Timer.start() catch unreachable;
     while (true) : (timer.reset()) {
-        defer std.Thread.sleep(ping_ns -| timer.lap());
+        defer std.Thread.sleep(config.refresh_rate -| timer.lap());
 
         const end_index = string_fba.end_index;
         defer string_fba.end_index = end_index;
@@ -73,7 +79,7 @@ pub fn main() !void {
                     usage_data_list.append(alloc, .{
                         .class = client_info.class,
                         .title = client_info.title,
-                        .duration = ping_ns,
+                        .duration = config.refresh_rate,
                     }) catch @panic("oom!");
                 }
             }
@@ -163,19 +169,90 @@ const parsing = struct {
     }
 };
 
-fn parseArgs() !Args {
-    var args = std.process.args();
-    _ = args.skip();
-    const database_path = if (args.next()) |path| path else blk: {
-        std.log.warn("Expected a path to a sqlite database file. Falling back to \"hyprcapture.sqlite\"", .{});
-        break :blk "./hyprcapture.sqlite";
-    };
+fn help(maybe_error: ?anyerror) noreturn {
+    if (maybe_error) |e| {
+        std.log.err(
+            \\An error occured ({s}). See help below.
+            \\
+        , .{@errorName(e)});
+    }
 
-    return .{ .database_path = database_path };
+    var file = std.fs.File.stderr();
+    var iobuf: [256]u8 = undefined;
+    var fwriter = file.writer(&iobuf);
+    fwriter.interface.print(
+        \\An application usage tracker for hyprland.
+        \\
+        \\Usage: hyprcapture [OPTIONS] [DATABASE]
+        \\
+        \\Arguments:
+        \\  [DATABASE]...
+        \\          sqlite database file to write stuff to.
+        \\
+        \\Options:
+        \\  -r, --refresh-rate
+        \\          Modify the rate at which the program samples application usage.
+        \\          This variable is specified in milliseconds. Default is {}. The
+        \\          value is clamped to the range [{}, {}].
+        \\
+    , .{
+        Config.default.refresh_rate / std.time.ns_per_ms,
+        min_refresh_rate_ms / std.time.ns_per_ms,
+        max_refresh_rate_ms / std.time.ns_per_ms,
+    }) catch {};
+
+    fwriter.interface.flush() catch {};
+
+    std.process.exit(@intFromBool(maybe_error != null));
 }
 
-const Args = struct {
+fn parseCmdline() !Config {
+    var args = std.process.args();
+    _ = args.skip();
+
+    var config = Config.default;
+
+    while (args.next()) |raw_arg| {
+        var arg = trim(raw_arg);
+        if (std.mem.eql(u8, arg, "--refresh-rate") or
+            std.mem.eql(u8, arg, "-r"))
+        {
+            arg = trim(args.next() orelse return error.ExpectedRefreshRate);
+            config.refresh_rate =
+                std.time.ns_per_ms *
+                try std.fmt.parseInt(@TypeOf(config.refresh_rate), arg, 10);
+            config.refresh_rate = std.math.clamp(config.refresh_rate, min_refresh_rate_ms, max_refresh_rate_ms);
+        } else //
+        if (std.mem.eql(u8, arg, "--help") or
+            std.mem.eql(u8, arg, "-h") or
+            std.mem.startsWith(u8, arg, "-"))
+        {
+            help(null);
+        } else {
+            config.database_path = raw_arg;
+        }
+    }
+
+    std.log.info(
+        \\Current configuration:
+        \\config.refresh_rate = {}ms
+        \\config.database_path = {s}
+    , .{
+        config.refresh_rate / std.time.ns_per_ms,
+        config.database_path,
+    });
+
+    return config;
+}
+
+const Config = struct {
+    refresh_rate: u64,
     database_path: [:0]const u8,
+
+    pub const default = Config{
+        .refresh_rate = 100 * std.time.ns_per_ms,
+        .database_path = "hyprcapture.sqlite",
+    };
 };
 
 fn initDatabase(database_path: [:0]const u8) !sqlite.Db {
